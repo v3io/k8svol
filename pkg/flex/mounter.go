@@ -2,6 +2,7 @@ package flex
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/v3io/k8svol/pkg/journal"
 	"os"
@@ -34,6 +35,9 @@ func (m *Mounter) doMount(targetPath string) *Response {
 		"--session_key", session}
 	if m.Spec.Container != "" {
 		args = append(args, "-a", m.Spec.Container)
+		if m.Spec.SubPath != "" {
+			args = append(args, "-p", m.Spec.SubPath)
+		}
 	}
 	mountCmd := exec.Command(m.Config.FusePath, args...)
 
@@ -67,6 +71,9 @@ func (m *Mounter) osMount() *Response {
 }
 
 func (m *Mounter) Mount() *Response {
+	if err := m.validate(); err != nil {
+		return Fail("Mount failed validation", err)
+	}
 	if m.Config.Type == "link" {
 		return m.mountAsLink()
 	}
@@ -79,7 +86,9 @@ func (m *Mounter) mountAsLink() *Response {
 	response := &Response{}
 	if !isMountPoint(targetPath) {
 		journal.Debug("Creating folder", "target", targetPath)
-		os.MkdirAll(targetPath, 0755)
+		if err := os.MkdirAll(targetPath, 0755); err != nil {
+			return Fail(fmt.Sprintf("unable to create target %s", targetPath), err)
+		}
 		response = m.doMount(targetPath)
 	}
 
@@ -88,7 +97,9 @@ func (m *Mounter) mountAsLink() *Response {
 		return Fail(fmt.Sprintf("unable to remove target %s", m.Target), err)
 	}
 
-	os.Symlink(targetPath, m.Target)
+	if err := os.Symlink(targetPath, m.Target); err != nil {
+		return Fail(fmt.Sprintf("unable to create link %s to target %s", targetPath, m.Target), err)
+	}
 	return response
 }
 
@@ -126,6 +137,16 @@ func (m *Mounter) Unmount() *Response {
 	return m.osUmount()
 }
 
+func (m *Mounter) validate() error {
+	if m.Spec.Username == "" || m.Spec.Password == "" {
+		return errors.New("required username or password is missing")
+	}
+	if m.Spec.SubPath != "" && m.Spec.Container == "" {
+		return errors.New("can't have subpath without container value")
+	}
+	return nil
+}
+
 func NewMounter(target, options string) (*Mounter, error) {
 	opts := VolumeSpec{}
 	if options != "" {
@@ -149,18 +170,16 @@ func Mount(target, options string) *Response {
 	mounter, err := NewMounter(target, options)
 	if err != nil {
 		return Fail("unable to create mounter", err)
-	} else {
-		return mounter.Mount()
 	}
+	return mounter.Mount()
 }
 
 func Unmount(target string) *Response {
 	mounter, err := NewMounter(target, "")
 	if err != nil {
 		return Fail("unable to create mounter", err)
-	} else {
-		return mounter.Unmount()
 	}
+	return mounter.Unmount()
 }
 
 func Init() *Response {
@@ -174,7 +193,7 @@ func Init() *Response {
 
 	location := path.Dir(os.Args[0])
 	command := exec.Command("/bin/bash", path.Join(location, "install.sh"))
-	
+
 	journal.Debug("Calling install command", "path", command.Path, "args", command.Args)
 	if err := command.Run(); err != nil {
 		return Fail("Initialization script failed", err)
